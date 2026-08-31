@@ -125,12 +125,15 @@ class FaceDetector:
         x, y, w, h = bbox
 
         if apply_margin:
-            mx = int(w * self.margin_ratio)
-            my = int(h * self.margin_ratio)
-            x_start = max(0, x - mx)
-            y_start = max(0, y - my)
-            x_end = min(w_img, x + w + mx)
-            y_end = min(h_img, y + h + my)
+            # Make the crop square-centered to avoid aspect ratio squashing
+            center_x = x + w / 2.0
+            center_y = y + h / 2.0
+            side = max(w, h) * (1.0 + 2.0 * self.margin_ratio)
+
+            x_start = int(max(0, center_x - side / 2.0))
+            y_start = int(max(0, center_y - side / 2.0))
+            x_end = int(min(w_img, center_x + side / 2.0))
+            y_end = int(min(h_img, center_y + side / 2.0))
         else:
             x_start, y_start = max(0, x), max(0, y)
             x_end, y_end = min(w_img, x + w), min(h_img, y + h)

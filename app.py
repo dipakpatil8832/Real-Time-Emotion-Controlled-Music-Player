@@ -5,6 +5,7 @@ temporal emotion smoothing, and an extensible music playback engine.
 """
 
 import io
+import os
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
@@ -13,6 +14,8 @@ import numpy as np
 import pandas as pd
 from PIL import Image
 import streamlit as st
+
+import streamlit.components.v1 as components
 
 from src.config import (
     EMOTION_METADATA,
@@ -25,7 +28,10 @@ from src.config import (
 )
 from src.face_detector import FaceDetector
 from src.model import EmotionClassifier
-from src.music_engine import LocalMusicProvider, MusicRecommender, Track
+from src.music_engine.base import BaseMusicProvider, Track
+from src.music_engine.local_provider import LocalMusicProvider
+from src.music_engine.recommender import MusicRecommender
+from src.music_engine.youtube_provider import YouTubeMusicProvider
 from src.smoothing import EmotionSmoother
 from src.utils import draw_face_annotations, logger, pil_to_cv2
 
@@ -120,9 +126,12 @@ def load_emotion_classifier() -> EmotionClassifier:
     return src.model.EmotionClassifier()
 
 
-@st.cache_resource(show_spinner="Loading Local Music Library...")
-def load_music_engine() -> Tuple[LocalMusicProvider, MusicRecommender]:
-    provider = LocalMusicProvider(MUSIC_DIR)
+@st.cache_resource(show_spinner="Connecting Music Provider...")
+def load_music_engine(engine_type: str = "YouTube", api_key: str = "") -> Tuple[BaseMusicProvider, MusicRecommender]:
+    if engine_type == "YouTube":
+        provider = YouTubeMusicProvider(api_key=api_key if api_key else None)
+    else:
+        provider = LocalMusicProvider(MUSIC_DIR)
     provider.initialize()
     recommender = MusicRecommender(provider)
     recommender.initialize()
@@ -154,13 +163,16 @@ if "manual_override_emotion" not in st.session_state:
 if "history_log" not in st.session_state:
     st.session_state.history_log = []
 
+if "youtube_api_key" not in st.session_state:
+    st.session_state.youtube_api_key = os.environ.get("YOUTUBE_API_KEY", "")
+
+if "music_engine_type" not in st.session_state:
+    st.session_state.music_engine_type = "YouTube"
+
 
 # Load Singletons
 detector = load_face_detector()
 classifier = load_emotion_classifier()
-music_provider, recommender = load_music_engine()
-recommender.auto_switch_enabled = st.session_state.auto_switch
-
 
 # Sidebar Controls
 with st.sidebar:
@@ -169,8 +181,88 @@ with st.sidebar:
     st.caption("AI-Powered Real-Time Music Experience")
 
     st.markdown("---")
-    st.subheader("⚙️ Vision & ML Settings")
+    st.subheader("🎧 Music Source & Streaming")
     
+    selected_source = st.radio(
+        "Audio Engine",
+        ["🎥 YouTube Music (Auto Stream)", "📁 Local Audio Library"],
+        index=0 if st.session_state.music_engine_type == "YouTube" else 1,
+        help="Select between live YouTube music playback and offline synthesized audio."
+    )
+    engine_choice = "YouTube" if "YouTube" in selected_source else "Local"
+    st.session_state.music_engine_type = engine_choice
+
+    if engine_choice == "YouTube":
+        with st.expander("🔑 YouTube Data API Key (Optional)"):
+            custom_key = st.text_input(
+                "API Key",
+                value=st.session_state.youtube_api_key,
+                type="password",
+                placeholder="AIzaSy...",
+                help="Optional: Paste Google YouTube Data API v3 key for customized live queries."
+            )
+            if custom_key != st.session_state.youtube_api_key:
+                st.session_state.youtube_api_key = custom_key
+                st.cache_resource.clear()
+                st.rerun()
+
+    st.markdown("---")
+    st.subheader("⚙️ Vision & ML Calibration")
+    
+    preset_mode = st.selectbox(
+        "🎯 Expression Calibration Preset",
+        options=[
+            "Real Webcam / Selfie (Subtle Expressions)",
+            "Studio / Google Stock Photos (Dramatic)",
+            "Custom Sensitivity"
+        ],
+        index=0,
+        help="Calibrates neural network priors for subtle everyday expressions vs dramatic theatrical stock photos."
+    )
+
+    if preset_mode == "Real Webcam / Selfie (Subtle Expressions)":
+        default_neutral_bias = 2.40
+        default_sad_boost = 0.60
+        default_sens = 1.25
+    elif preset_mode == "Studio / Google Stock Photos (Dramatic)":
+        default_neutral_bias = 1.10
+        default_sad_boost = 0.10
+        default_sens = 1.00
+    else:
+        default_neutral_bias = float(getattr(vision_config, "neutral_logit_bias", 2.40))
+        default_sad_boost = float(getattr(vision_config, "sadness_boost", 0.60))
+        default_sens = float(getattr(vision_config, "emotion_sensitivity", 1.25))
+
+    neutral_logit_bias = st.slider(
+        "Neutral Bias Suppression",
+        min_value=0.0,
+        max_value=4.0,
+        value=default_neutral_bias,
+        step=0.10,
+        help="Penalizes the neural network's inherent neutral class over-representation in logit space."
+    )
+    classifier.neutral_logit_bias = neutral_logit_bias
+
+    sadness_boost_val = st.slider(
+        "Sadness & Micro-Expression Boost",
+        min_value=0.0,
+        max_value=1.5,
+        value=default_sad_boost,
+        step=0.05,
+        help="Enhances sensitivity to subtle lip downturns, drooping eyelids, and gentle sad expressions."
+    )
+    classifier.sadness_boost = sadness_boost_val
+
+    emotion_sens = st.slider(
+        "Active Emotion Sensitivity",
+        min_value=0.8,
+        max_value=2.5,
+        value=default_sens,
+        step=0.05,
+        help="Multiplies sensitivity across all active expressions (Happy, Sad, Angry, Surprise)."
+    )
+    classifier.emotion_sensitivity = emotion_sens
+
     confidence_thresh = st.slider(
         "Confidence Threshold",
         min_value=0.20,
@@ -180,26 +272,6 @@ with st.sidebar:
         help="Minimum neural network confidence required to register an emotion."
     )
     classifier.confidence_threshold = confidence_thresh
-
-    emotion_sens = st.slider(
-        "Emotion Sensitivity",
-        min_value=1.0,
-        max_value=2.5,
-        value=float(getattr(vision_config, "emotion_sensitivity", 1.25)),
-        step=0.05,
-        help="Multiplies sensitivity for active emotions (Happy, Sad, Angry, Surprise)."
-    )
-    classifier.emotion_sensitivity = emotion_sens
-
-    neutral_suppression = st.slider(
-        "Neutral Bias Attenuation",
-        min_value=0.30,
-        max_value=1.0,
-        value=float(getattr(vision_config, "neutral_suppression_factor", 0.70)),
-        step=0.05,
-        help="Lowers neutral dominance to ensure natural facial expressions are recognized."
-    )
-    classifier.neutral_bias_weight = neutral_suppression
 
     smoothing_window = st.slider(
         "Smoothing Buffer Window",
@@ -220,7 +292,6 @@ with st.sidebar:
         help="Automatically changes music when a new stable emotion is detected."
     )
     st.session_state.auto_switch = auto_pilot
-    recommender.auto_switch_enabled = auto_pilot
 
     manual_override = st.selectbox(
         "Manual Emotion Override",
@@ -228,6 +299,12 @@ with st.sidebar:
         index=0
     )
 
+
+# Load Music Provider and Recommender
+music_provider, recommender = load_music_engine(st.session_state.music_engine_type, st.session_state.youtube_api_key)
+recommender.auto_switch_enabled = st.session_state.auto_switch
+
+with st.sidebar:
     if manual_override != "None (Use AI Vision)":
         override_key = manual_override.lower()
         if override_key != st.session_state.current_emotion:
@@ -256,7 +333,7 @@ with st.sidebar:
 
 # Main Dashboard Header
 st.title("🎭 Real-Time Emotion-Controlled Music Player")
-st.markdown("Webcam-driven facial emotion classification with MobileNetV2, temporal smoothing, and automatic soundtrack synthesis.")
+st.markdown("Webcam-driven facial emotion classification with calibrated FERPlus Bayesian priors, temporal smoothing, and automatic soundtrack synthesis.")
 
 tab_player, tab_analytics, tab_architecture = st.tabs(["🎧 Live Player & Vision", "📊 Analytics & History", "🧠 Model & Architecture"])
 
@@ -285,10 +362,11 @@ with tab_player:
 
                 if primary_face is not None:
                     detected_face_roi = detector.crop_face(frame, primary_face)
-                    # Predict emotion via Deep Neural Network with calibrated class balance
+                    # Predict emotion via Deep Neural Network with Bayesian logit calibration
                     raw_emotion, raw_conf, raw_probs = classifier.predict_emotion(
                         detected_face_roi,
-                        neutral_weight=neutral_suppression,
+                        neutral_bias=neutral_logit_bias,
+                        sad_boost=sadness_boost_val,
                         sensitivity=emotion_sens
                     )
 
@@ -333,7 +411,8 @@ with tab_player:
                     detected_face_roi = detector.crop_face(frame, primary_face)
                     raw_emotion, raw_conf, raw_probs = classifier.predict_emotion(
                         detected_face_roi,
-                        neutral_weight=neutral_suppression,
+                        neutral_bias=neutral_logit_bias,
+                        sad_boost=sadness_boost_val,
                         sensitivity=emotion_sens
                     )
                     
@@ -403,13 +482,35 @@ with tab_player:
         </div>
         """, unsafe_allow_html=True)
 
-        # Audio Playback Widget
+        # Audio / Video Playback Widget
         if current_track:
-            audio_bytes = music_provider.get_track_audio_bytes(current_track)
-            if audio_bytes:
-                st.audio(audio_bytes, format="audio/wav", start_time=0)
+            if current_track.stream_url and "youtube.com" in current_track.stream_url:
+                embed_url = current_track.extra_metadata.get(
+                    "embed_url",
+                    f"https://www.youtube.com/embed/{current_track.id}?autoplay=1&enablejsapi=1"
+                )
+                components.html(
+                    f"""
+                    <div style="position: relative; width: 100%; border-radius: 12px; overflow: hidden; box-shadow: 0 8px 32px rgba(0,0,0,0.5);">
+                        <iframe width="100%" height="280" 
+                                src="{embed_url}" 
+                                title="{current_track.title}" 
+                                frameborder="0" 
+                                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" 
+                                allowfullscreen 
+                                style="border-radius: 12px;">
+                        </iframe>
+                    </div>
+                    """,
+                    height=300
+                )
+                st.caption(f"🎥 Streaming from YouTube • [Watch on YouTube]({current_track.stream_url})")
             else:
-                st.info("Audio stream buffer ready.")
+                audio_bytes = music_provider.get_track_audio_bytes(current_track)
+                if audio_bytes:
+                    st.audio(audio_bytes, format="audio/wav", start_time=0)
+                else:
+                    st.info("Audio stream buffer ready.")
 
         # Interactive Controls
         btn_col1, btn_col2, btn_col3 = st.columns(3)
@@ -451,9 +552,14 @@ with tab_player:
             for idx, trk in enumerate(matching_tracks):
                 is_active = current_track and trk.id == current_track.id
                 prefix = "▶️ **[PLAYING]** " if is_active else f"{idx+1}. "
-                c_info, c_act = st.columns([3, 1])
+                c_thumb, c_info, c_act = st.columns([1, 4, 1.2])
+                with c_thumb:
+                    if trk.cover_art_url:
+                        st.image(trk.cover_art_url, width=54)
+                    else:
+                        st.write("🎵")
                 with c_info:
-                    st.write(f"{prefix}{trk.title} ({trk.genre})")
+                    st.markdown(f"{prefix}**{trk.title}**  \n<span style='font-size:12px; color:#94a3b8;'>{trk.artist} • {trk.genre}</span>", unsafe_allow_html=True)
                 with c_act:
                     if not is_active and st.button("Play", key=f"play_{trk.id}"):
                         recommender.set_current_track(trk)

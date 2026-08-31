@@ -5,8 +5,12 @@ audio synthesis, local music provider, and recommendation engine.
 """
 
 import os
+import sys
 import tempfile
 from pathlib import Path
+
+# Add project root to path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import cv2
 import numpy as np
@@ -20,6 +24,7 @@ from src.music_engine import (
     MusicRecommender,
     ProceduralAudioSynthesizer,
     Track,
+    YouTubeMusicProvider,
 )
 from src.smoothing import EmotionSmoother
 
@@ -79,6 +84,15 @@ class TestModelArchitecture:
         assert 0.0 <= conf <= 1.0
         assert len(probs) == len(EMOTIONS)
         assert pytest.approx(sum(probs.values()), 0.01) == 1.0
+
+        # Test calibrated logit prediction
+        sad_sample = np.full((128, 128, 3), 160, dtype=np.uint8)
+        cv2.circle(sad_sample, (40, 45), 8, (40, 40, 40), -1)
+        cv2.circle(sad_sample, (88, 45), 8, (40, 40, 40), -1)
+        cv2.ellipse(sad_sample, (64, 100), (28, 14), 0, 180, 360, (40, 40, 40), 3)
+        s_emotion, s_conf, s_probs = classifier.predict_emotion(sad_sample, neutral_bias=2.40, sad_boost=0.60)
+        assert s_emotion in EMOTIONS
+        assert 0.0 <= s_conf <= 1.0
 
 
 class TestEmotionSmoother:
@@ -156,3 +170,39 @@ class TestMusicProviderAndRecommender:
         # Test smart next
         next_track = recommender.next_track()
         assert next_track is not None
+
+
+class TestYouTubeMusicProvider:
+    def test_youtube_provider_initialization(self):
+        yt_provider = YouTubeMusicProvider()
+        success = yt_provider.initialize()
+        assert success is True
+        assert len(yt_provider.get_all_tracks()) >= 15
+
+    def test_youtube_tracks_for_all_emotions(self):
+        yt_provider = YouTubeMusicProvider()
+        yt_provider.initialize()
+
+        for emotion in EMOTIONS:
+            tracks = yt_provider.get_tracks_by_emotion(emotion)
+            assert len(tracks) >= 3
+            for t in tracks:
+                assert t.emotion_tag == emotion
+                assert t.stream_url is not None
+                assert "youtube.com" in t.stream_url
+                assert "embed_url" in t.extra_metadata
+
+    def test_youtube_recommender_auto_switch(self):
+        yt_provider = YouTubeMusicProvider()
+        yt_provider.initialize()
+        recommender = MusicRecommender(yt_provider)
+        recommender.initialize()
+
+        assert recommender.current_track is not None
+        
+        # Test switching to sad YouTube track
+        sad_track = recommender.on_emotion_update("sad", 0.88, 0.95)
+        if sad_track:
+            assert sad_track.emotion_tag == "sad"
+            assert recommender.current_emotion == "sad"
+            assert "youtube.com" in sad_track.stream_url

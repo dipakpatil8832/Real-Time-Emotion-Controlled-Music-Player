@@ -44,7 +44,7 @@ class EmotionClassifier:
     """
     Production Deep Learning inference engine using OpenCV DNN with FERPlus ONNX model.
     Accurately classifies faces into: happy, sad, angry, surprise, neutral with
-    calibrated class balance to eliminate neutral bias.
+    calibrated Bayesian logit prior shifts to eliminate neutral bias in real-world images.
     """
 
     def __init__(
@@ -52,17 +52,24 @@ class EmotionClassifier:
         model_path: Optional[Path] = None,
         labels: Optional[List[str]] = None,
         confidence_threshold: float = 0.35,
-        neutral_bias_weight: float = 0.70,
-        emotion_sensitivity: float = 1.25
+        neutral_logit_bias: float = 2.40,
+        sadness_boost: float = 0.60,
+        emotion_sensitivity: float = 1.25,
+        temperature: float = 1.0,
+        neutral_bias_weight: Optional[float] = None
     ):
         self.labels = labels or EMOTIONS
         self.confidence_threshold = confidence_threshold
-        self.neutral_bias_weight = neutral_bias_weight
+        self.neutral_logit_bias = neutral_logit_bias
+        self.sadness_boost = sadness_boost
         self.emotion_sensitivity = emotion_sensitivity
+        self.temperature = temperature
+        # Backward compatibility
+        self.neutral_bias_weight = neutral_bias_weight if neutral_bias_weight is not None else 0.70
         self.onnx_path = Path(model_path or ONNX_MODEL_PATH)
         self.backend = "OpenCV-DNN-FERPlus"
         self.net = self._load_dnn_model()
-        self.clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(4, 4))
+        self.clahe = cv2.createCLAHE(clipLimit=1.5, tileGridSize=(8, 8))
 
     def _load_dnn_model(self) -> Optional[cv2.dnn.Net]:
         """Loads the pre-trained Deep Neural Network via OpenCV DNN."""
@@ -91,15 +98,19 @@ class EmotionClassifier:
         self,
         face_roi: np.ndarray,
         neutral_weight: Optional[float] = None,
-        sensitivity: Optional[float] = None
+        sensitivity: Optional[float] = None,
+        neutral_bias: Optional[float] = None,
+        sad_boost: Optional[float] = None
     ) -> Tuple[str, float, Dict[str, float]]:
         """
-        Runs deep learning inference on face ROI image with bias-corrected class calibration.
+        Runs deep learning inference on face ROI image with logit-space Bayesian prior calibration.
         
         Args:
             face_roi: Cropped face image (BGR, RGB, or Grayscale).
-            neutral_weight: Optional override for neutral attenuation factor (default ~0.70).
-            sensitivity: Optional override for active emotion sensitivity multiplier (default ~1.25).
+            neutral_weight: Optional legacy post-weight override.
+            sensitivity: Optional sensitivity multiplier for active emotions (default ~1.25).
+            neutral_bias: Optional override for neutral logit penalty (default ~2.40).
+            sad_boost: Optional override for sadness logit boost (default ~0.60).
             
         Returns:
             Tuple of:
@@ -107,7 +118,8 @@ class EmotionClassifier:
             - confidence (float): score [0.0 - 1.0]
             - probabilities (dict): {emotion: prob}
         """
-        w_neutral = self.neutral_bias_weight if neutral_weight is None else neutral_weight
+        bias_neutral = self.neutral_logit_bias if neutral_bias is None else neutral_bias
+        boost_sad = self.sadness_boost if sad_boost is None else sad_boost
         w_sens = self.emotion_sensitivity if sensitivity is None else sensitivity
 
         uniform = {e: 0.20 for e in self.labels}
@@ -144,19 +156,22 @@ class EmotionClassifier:
             if gray.shape[0] < 5 or gray.shape[1] < 5:
                 return "neutral", 0.20, uniform
 
-            # Resize to (64, 64) for FERPlus ONNX
-            resized_64 = cv2.resize(gray, (64, 64), interpolation=cv2.INTER_AREA)
-
-            # Apply CLAHE to accentuate facial muscle expressions (smile lines, furrowed brow, eye contours)
+            # Apply gentle CLAHE on high-res face crop to preserve natural facial curves without 16x16 block artifacts
             try:
-                enhanced_64 = self.clahe.apply(resized_64)
+                if gray.shape[0] >= 32 and gray.shape[1] >= 32:
+                    enhanced_gray = self.clahe.apply(gray)
+                else:
+                    enhanced_gray = gray
             except Exception:
-                enhanced_64 = resized_64
+                enhanced_gray = gray
+
+            # Resize to (64, 64) for FERPlus ONNX
+            resized_64 = cv2.resize(enhanced_gray, (64, 64), interpolation=cv2.INTER_AREA)
 
             if self.net is not None:
-                # Blob format (1, 1, 64, 64)
+                # Blob format (1, 1, 64, 64) float32
                 blob = cv2.dnn.blobFromImage(
-                    enhanced_64,
+                    resized_64.astype(np.float32),
                     scalefactor=1.0,
                     size=(64, 64),
                     mean=(0,),
@@ -165,19 +180,33 @@ class EmotionClassifier:
                 )
 
                 self.net.setInput(blob)
-                logits = self.net.forward()[0]  # 8 FERPlus classes
+                raw_logits = self.net.forward()[0].copy()  # 8 FERPlus classes
 
-                # Softmax with numerical stability
-                exp_logits = np.exp(logits - np.max(logits))
-                raw_probs = exp_logits / (np.sum(exp_logits) + 1e-9)
+                # FERPlus 8 classes:
+                # [0: neutral, 1: happiness, 2: surprise, 3: sadness, 4: anger, 5: disgust, 6: fear, 7: contempt]
+                calibrated_logits = raw_logits.astype(np.float32)
 
-                # Map FERPlus 8 classes to our 5 target emotions with calibrated class balance:
-                # ['neutral', 'happiness', 'surprise', 'sadness', 'anger', 'disgust', 'fear', 'contempt']
-                p_neutral = float(raw_probs[0]) * w_neutral
-                p_happy = float(raw_probs[1]) * w_sens
-                p_surprise = float(raw_probs[2] + 0.6 * raw_probs[6]) * w_sens
-                p_sad = float(raw_probs[3] + 0.4 * raw_probs[6]) * w_sens
-                p_angry = float(raw_probs[4] + raw_probs[5] + raw_probs[7]) * w_sens
+                # 1. Logit Prior Shift: Deduct neutral bias baseline
+                calibrated_logits[0] -= bias_neutral
+
+                # 2. Boost subtle real-world sadness expressions
+                calibrated_logits[3] += boost_sad
+
+                # 3. Apply active emotion sensitivity scaling in logit space
+                sens_gain = float(np.log(max(0.1, w_sens)))
+                calibrated_logits[1:] += sens_gain
+
+                # 4. Temperature-scaled Softmax
+                t = max(0.2, self.temperature)
+                exp_logits = np.exp((calibrated_logits / t) - np.max(calibrated_logits / t))
+                probs_8 = exp_logits / (np.sum(exp_logits) + 1e-9)
+
+                # 5. Map calibrated 8 FERPlus classes to our 5 target emotions:
+                p_happy = float(probs_8[1])
+                p_sad = float(probs_8[3] + 0.35 * probs_8[6])
+                p_angry = float(probs_8[4] + 0.50 * probs_8[5] + 0.30 * probs_8[7])
+                p_surprise = float(probs_8[2] + 0.35 * probs_8[6])
+                p_neutral = float(probs_8[0])
 
                 scores = np.array([p_happy, p_sad, p_angry, p_surprise, p_neutral], dtype=np.float32)
                 scores = scores / (np.sum(scores) + 1e-9)

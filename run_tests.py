@@ -64,7 +64,15 @@ class TestEmotionMusicPlayer(unittest.TestCase):
         self.assertTrue(0.0 <= conf <= 1.0)
         self.assertEqual(len(probs), 5)
         self.assertAlmostEqual(sum(probs.values()), 1.0, places=2)
-        print(f" -> Classifier inference successful! Dominant: {dom_emotion} ({conf:.2f}), Backend: {classifier.backend}")
+
+        # Test synthetic sad face expression with downturned mouth
+        sad_img = np.full((128, 128, 3), 160, dtype=np.uint8)
+        cv2.circle(sad_img, (40, 45), 8, (40, 40, 40), -1)
+        cv2.circle(sad_img, (88, 45), 8, (40, 40, 40), -1)
+        cv2.ellipse(sad_img, (64, 100), (28, 14), 0, 180, 360, (40, 40, 40), 3)
+        sad_dom, sad_conf, sad_probs = classifier.predict_emotion(sad_img, neutral_bias=2.40, sad_boost=0.60)
+        self.assertIn(sad_dom, ["sad", "angry", "neutral"])
+        print(f" -> Classifier inference successful! Dominant: {dom_emotion} ({conf:.2f}), Sad test: {sad_dom} ({sad_conf:.2f}), Backend: {classifier.backend}")
 
     def test_03_temporal_smoothing(self):
         print("\n[TEST 3] Testing Temporal Emotion Smoother...")
@@ -121,6 +129,28 @@ class TestEmotionMusicPlayer(unittest.TestCase):
         next_trk = recommender.next_track()
         self.assertIsNotNone(next_trk)
         print(f" -> Music Provider & Recommender (Current: '{next_trk.title}'): OK")
+
+    def test_06_youtube_music_provider(self):
+        print("\n[TEST 6] Testing YouTube Music Provider & Emotion Streaming...")
+        from src.music_engine.youtube_provider import YouTubeMusicProvider
+        yt_provider = YouTubeMusicProvider()
+        self.assertTrue(yt_provider.initialize())
+        self.assertTrue(len(yt_provider.get_all_tracks()) >= 15)
+
+        for emotion in EMOTIONS:
+            tracks = yt_provider.get_tracks_by_emotion(emotion)
+            self.assertTrue(len(tracks) >= 2)
+            self.assertIn("youtube.com", tracks[0].stream_url)
+
+        recommender = MusicRecommender(yt_provider)
+        recommender.initialize()
+        
+        # Test auto switch to Sad YouTube track
+        sad_trk = recommender.on_emotion_update("sad", 0.92, 0.85)
+        if sad_trk:
+            self.assertEqual(sad_trk.emotion_tag, "sad")
+            self.assertIn("youtube.com", sad_trk.stream_url)
+            print(f" -> YouTube Auto-Switch OK! Emotion: {sad_trk.emotion_tag} -> '{sad_trk.title}' ({sad_trk.stream_url})")
 
 
 if __name__ == "__main__":

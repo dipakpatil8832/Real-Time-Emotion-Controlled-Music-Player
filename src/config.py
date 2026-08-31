@@ -83,10 +83,13 @@ class VisionConfig:
     face_min_size: Tuple[int, int] = (60, 60)
     scale_factor: float = 1.1
     min_neighbors: int = 5
-    face_margin_ratio: float = 0.10  # Balanced margin to focus on facial features
+    face_margin_ratio: float = 0.08  # Normalized margin to match FER+ face crop boundaries
     confidence_threshold: float = 0.35  # Minimum prediction confidence to accept
-    neutral_suppression_factor: float = 0.70  # Calibration factor to counter dataset neutral dominance
-    emotion_sensitivity: float = 1.25  # Sensitivity boost for active facial expressions
+    neutral_logit_bias: float = 2.40  # Logit prior penalty to counter FERPlus neutral baseline dominance
+    sadness_boost: float = 0.60  # Sensitivity boost for subtle real-world sadness expressions
+    temperature: float = 1.0  # Logit softmax temperature scaling
+    neutral_suppression_factor: float = 0.70  # Backward-compatible parameter
+    emotion_sensitivity: float = 1.25  # Backward-compatible parameter
     haar_cascade_path: Path = MODELS_DIR / "haarcascade_frontalface_default.xml"
 
 
