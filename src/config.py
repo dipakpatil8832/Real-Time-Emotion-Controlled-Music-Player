@@ -80,16 +80,19 @@ class ModelConfig:
 @dataclass
 class VisionConfig:
     """Vision and Face Detection Configuration."""
-    face_min_size: Tuple[int, int] = (60, 60)
+    face_min_size: Tuple[int, int] = (50, 50)
     scale_factor: float = 1.1
     min_neighbors: int = 5
-    face_margin_ratio: float = 0.08  # Normalized margin to match FER+ face crop boundaries
-    confidence_threshold: float = 0.35  # Minimum prediction confidence to accept
-    neutral_logit_bias: float = 2.40  # Logit prior penalty to counter FERPlus neutral baseline dominance
-    sadness_boost: float = 0.60  # Sensitivity boost for subtle real-world sadness expressions
-    temperature: float = 1.0  # Logit softmax temperature scaling
-    neutral_suppression_factor: float = 0.70  # Backward-compatible parameter
-    emotion_sensitivity: float = 1.25  # Backward-compatible parameter
+    face_margin_ratio: float = 0.15  # Margin to capture eyebrows, forehead, cheeks, and chin
+    confidence_threshold: float = 0.30  # Minimum prediction confidence to accept
+    neutral_logit_bias: float = 0.00  # Clean baseline
+    sadness_boost: float = 0.00  # Clean baseline
+    temperature: float = 1.00  # Standard softmax temperature
+    neutral_suppression_factor: float = 1.00
+    emotion_sensitivity: float = 1.00
+    uncertainty_margin: float = 0.03
+    default_backend: str = "onnx"  # 'onnx' (Instant 10ms) or 'vit' (Vision Transformer SOTA)
+    vit_model_name: str = "trpakov/vit-face-expression"
     haar_cascade_path: Path = MODELS_DIR / "haarcascade_frontalface_default.xml"
 
 
@@ -116,3 +119,15 @@ model_config = ModelConfig()
 vision_config = VisionConfig()
 smoothing_config = SmoothingConfig()
 music_config = MusicConfig()
+
+# Gemini GenAI LLM Configuration
+import os
+try:
+    from dotenv import load_dotenv
+    load_dotenv(BASE_DIR / ".env")
+except ImportError:
+    pass
+
+DEFAULT_GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", os.getenv("GEMINI_API_KEY", ""))
+GEMINI_DEFAULT_MODEL = "gemini-1.5-flash"
+

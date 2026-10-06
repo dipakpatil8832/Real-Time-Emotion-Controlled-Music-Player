@@ -1,12 +1,20 @@
-"""
-Convenient Test Runner for EmotiBeat.
-Executes all modular unit tests directly with detailed assertion reporting.
-"""
-
+import os
 import sys
 import unittest
 import numpy as np
 from pathlib import Path
+
+# Add Windows PyTorch DLL directory if available
+if sys.platform == "win32":
+    import site
+    for p in sys.path + (site.getsitepackages() if hasattr(site, "getsitepackages") else []) + ([site.getusersitepackages()] if hasattr(site, "getusersitepackages") else []):
+        t_lib = Path(p) / "torch" / "lib"
+        if t_lib.exists():
+            try:
+                os.add_dll_directory(str(t_lib))
+            except Exception:
+                pass
+            os.environ["PATH"] = str(t_lib) + ";" + os.environ.get("PATH", "")
 
 # Add project root to sys.path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -46,8 +54,11 @@ class TestEmotionMusicPlayer(unittest.TestCase):
         cropped = detector.crop_face(img, bbox, apply_margin=True)
         self.assertIsNotNone(cropped)
 
-        preprocessed = detector.preprocess_face_for_model(cropped, target_size=(224, 224))
-        self.assertEqual(preprocessed.shape, (1, 224, 224, 3))
+        preprocessed_rgb = detector.preprocess_face_for_model(cropped, target_size=(224, 224), to_rgb=True)
+        self.assertEqual(preprocessed_rgb.shape, (1, 224, 224, 3))
+        
+        preprocessed_onnx = detector.preprocess_face_for_model(cropped, target_size=(64, 64), to_rgb=False)
+        self.assertEqual(preprocessed_onnx.shape, (1, 1, 64, 64))
         print(" -> FaceDetector: OK")
 
     def test_02_model_and_classifier(self):
@@ -57,22 +68,30 @@ class TestEmotionMusicPlayer(unittest.TestCase):
         self.assertIsNotNone(model)
 
         classifier = EmotionClassifier()
-        dummy_face = np.random.uniform(0, 255, (1, 224, 224, 3)).astype(np.float32)
+        dummy_face = np.random.uniform(0, 255, (1, 64, 64, 3)).astype(np.float32)
         dom_emotion, conf, probs = classifier.predict_emotion(dummy_face)
         
         self.assertIn(dom_emotion, EMOTIONS)
         self.assertTrue(0.0 <= conf <= 1.0)
         self.assertEqual(len(probs), 5)
-        self.assertAlmostEqual(sum(probs.values()), 1.0, places=2)
+        self.assertAlmostEqual(sum(probs.values()), 1.0, places=3)
 
-        # Test synthetic sad face expression with downturned mouth
-        sad_img = np.full((128, 128, 3), 160, dtype=np.uint8)
-        cv2.circle(sad_img, (40, 45), 8, (40, 40, 40), -1)
-        cv2.circle(sad_img, (88, 45), 8, (40, 40, 40), -1)
-        cv2.ellipse(sad_img, (64, 100), (28, 14), 0, 180, 360, (40, 40, 40), 3)
-        sad_dom, sad_conf, sad_probs = classifier.predict_emotion(sad_img, neutral_bias=2.40, sad_boost=0.60)
-        self.assertIn(sad_dom, ["sad", "angry", "neutral"])
-        print(f" -> Classifier inference successful! Dominant: {dom_emotion} ({conf:.2f}), Sad test: {sad_dom} ({sad_conf:.2f}), Backend: {classifier.backend}")
+        # Test pure baseline prediction on neutral synthetic face
+        neutral_img = np.full((64, 64, 3), 128, dtype=np.uint8)
+        cv2.circle(neutral_img, (20, 25), 4, (30, 30, 30), -1)
+        cv2.circle(neutral_img, (44, 25), 4, (30, 30, 30), -1)
+        cv2.line(neutral_img, (22, 45), (42, 45), (30, 30, 30), 2)
+        detailed = classifier.predict_emotion_detailed(neutral_img)
+        self.assertIn("dominant_emotion", detailed)
+        self.assertIn("display_emotion", detailed)
+        self.assertAlmostEqual(sum(detailed["probabilities"].values()), 1.0, places=3)
+
+        # Test threshold fallback
+        strict_classifier = EmotionClassifier(confidence_threshold=0.99)
+        strict_result = strict_classifier.predict_emotion_detailed(neutral_img)
+        self.assertTrue(strict_result["is_uncertain"])
+        self.assertEqual(strict_result["display_emotion"], "neutral")
+        print(f" -> Classifier inference successful! Dominant: {dom_emotion} ({conf:.2f}), Neutral test: {detailed['dominant_emotion']} ({detailed['confidence']:.2f}), Threshold fallback: OK")
 
     def test_03_temporal_smoothing(self):
         print("\n[TEST 3] Testing Temporal Emotion Smoother...")

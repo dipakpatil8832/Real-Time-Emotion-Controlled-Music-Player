@@ -49,42 +49,79 @@ def draw_face_annotations(
     bbox: Tuple[int, int, int, int],
     emotion: str,
     confidence: float,
-    all_probabilities: Optional[Dict[str, float]] = None
+    all_probabilities: Optional[Dict[str, float]] = None,
+    is_uncertain: bool = False,
+    other_faces: Optional[List[Tuple[int, int, int, int]]] = None
 ) -> np.ndarray:
     """
-    Annotates a video frame with styled bounding box, emotion badge, and confidence percentage.
+    Annotates an image frame with styled bounding box, emotion badge, and confidence percentage.
+    Supports secondary face indicators and uncertainty badges.
     """
     annotated = frame.copy()
+    
+    # 1. Draw secondary faces with subtle muted boxes if present
+    if other_faces:
+        for idx, (ox, oy, ow, oh) in enumerate(other_faces, start=2):
+            cv2.rectangle(annotated, (ox, oy), (ox + ow, oy + oh), (120, 140, 160), 1, lineType=cv2.LINE_AA)
+            sub_label = f"Face #{idx}"
+            cv2.putText(
+                annotated,
+                sub_label,
+                (ox + 4, max(15, oy - 6)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.45,
+                (180, 200, 220),
+                1,
+                lineType=cv2.LINE_AA
+            )
+
+    # 2. Draw primary face
     x, y, w, h = bbox
-    meta = EMOTION_METADATA.get(emotion.lower(), {"color": "#10B981", "emoji": "🎭"})
+    meta = EMOTION_METADATA.get(emotion.lower(), {"color": "#6366F1", "emoji": "🌿"})
     
-    # Convert hex color to BGR for OpenCV
-    hex_color = meta["color"].lstrip("#")
-    rgb_tuple = tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
-    bgr_color = (rgb_tuple[2], rgb_tuple[1], rgb_tuple[0])
+    if is_uncertain:
+        # Amber warning color for uncertain/fallback states
+        bgr_color = (30, 160, 245)  # Amber in BGR
+        label_text = f"Uncertain: {emotion.capitalize()} ({confidence * 100:.1f}%)"
+    else:
+        # Convert hex color to BGR for OpenCV
+        hex_color = meta.get("color", "#6366F1").lstrip("#")
+        rgb_tuple = tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
+        bgr_color = (rgb_tuple[2], rgb_tuple[1], rgb_tuple[0])
+        label_text = f"{emotion.capitalize()} ({confidence * 100:.1f}%)"
 
-    # Draw rounded-corner bounding box
-    cv2.rectangle(annotated, (x, y), (x + w, y + h), bgr_color, 2, lineType=cv2.LINE_AA)
+    # Draw primary face bounding box (thickness 3)
+    cv2.rectangle(annotated, (x, y), (x + w, y + h), bgr_color, 3, lineType=cv2.LINE_AA)
 
-    # Header label banner
-    label_text = f"{emotion.capitalize()} ({confidence * 100:.1f}%)"
-    (text_w, text_h), baseline = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.65, 2)
+    # Header label banner calculation
+    font_scale = 0.65
+    thickness = 2
+    (text_w, text_h), baseline = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness)
     
-    banner_top = max(0, y - text_h - 14)
-    banner_bottom = y
+    banner_height = text_h + 12
+    if y >= banner_height:
+        banner_top = y - banner_height
+        banner_bottom = y
+        text_y = y - 6
+    else:
+        banner_top = y + h
+        banner_bottom = y + h + banner_height
+        text_y = banner_bottom - 6
+
     banner_right = min(annotated.shape[1], x + text_w + 16)
     
     # Fill label banner background
     cv2.rectangle(annotated, (x, banner_top), (banner_right, banner_bottom), bgr_color, -1)
+    
     # Draw label text (white)
     cv2.putText(
         annotated,
         label_text,
-        (x + 8, banner_bottom - 6),
+        (x + 8, text_y),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.65,
+        font_scale,
         (255, 255, 255),
-        2,
+        thickness,
         lineType=cv2.LINE_AA
     )
 

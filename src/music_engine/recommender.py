@@ -37,19 +37,26 @@ class MusicRecommender:
     def get_recommendation(
         self,
         emotion: str,
-        force_new: bool = False
+        force_new: bool = False,
+        language: Optional[str] = None
     ) -> Optional[Track]:
         """
-        Recommends a suitable track for the specified emotion.
+        Recommends a suitable track for the specified emotion and language.
         Avoids recently played tracks if alternatives exist.
         """
         emotion_key = emotion.lower()
         if emotion_key not in EMOTIONS:
             emotion_key = "neutral"
 
-        available_tracks = self.provider.get_tracks_by_emotion(emotion_key)
+        if hasattr(self.provider, "get_tracks_by_emotion"):
+            try:
+                available_tracks = self.provider.get_tracks_by_emotion(emotion_key, language=language)
+            except TypeError:
+                available_tracks = self.provider.get_tracks_by_emotion(emotion_key)
+        else:
+            available_tracks = self.provider.get_all_tracks()
+
         if not available_tracks:
-            # Fallback to any track
             available_tracks = self.provider.get_all_tracks()
             if not available_tracks:
                 return None
